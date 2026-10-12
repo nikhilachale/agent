@@ -76,6 +76,19 @@ async fn assert_gone(pid: u32, identity: &str) {
     .expect("owned shell must stop executing");
 }
 
+async fn prove_cleanup(owned: &[(u32, String)], late: &Path, control: &mut tokio::process::Child, identity: &str) {
+    for (pid, identity) in owned {
+        assert_gone(*pid, identity).await;
+    }
+    let control_pid = control.id().unwrap();
+    assert!(control.try_wait().unwrap().is_none(), "unrelated process survives");
+    assert_eq!(process_identity(control_pid).as_deref(), Some(identity));
+    sleep(Duration::from_millis(2200)).await;
+    assert!(!late.exists(), "cancelled descendant must not write later");
+    assert!(control.try_wait().unwrap().is_none(), "control survives deadline");
+    assert_eq!(process_identity(control_pid).as_deref(), Some(identity));
+}
+
 async fn exercise(kind: &str, configured_timeout: Option<u64>) {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("started");
@@ -124,6 +137,7 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
     if kind == "disconnect" {
         client.cancel().await.unwrap();
         server.cancel().await.unwrap();
+        prove_cleanup(&owned, &late, &mut control, &control_identity).await;
     } else {
         if kind == "cancel" || kind == "abort" {
             client
@@ -141,6 +155,7 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
             let result = result.unwrap();
             assert!(format!("{result:?}").contains("timed out"));
         }
+        prove_cleanup(&owned, &late, &mut control, &control_identity).await;
         // The same MCP session must still execute a subsequent command.
         let next = client
             .call_tool(CallToolRequestParam {
@@ -158,18 +173,6 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
         client.cancel().await.unwrap();
         server.cancel().await.unwrap();
     }
-    for (pid, identity) in owned {
-        assert_gone(pid, &identity).await;
-    }
-    assert_eq!(process_identity(control_pid), Some(control_identity.clone()));
-    assert!(
-        control.try_wait().unwrap().is_none(),
-        "unrelated process survives"
-    );
-    sleep(Duration::from_millis(2200)).await;
-    assert!(!late.exists(), "cancelled descendant must not write later");
-    assert!(control.try_wait().unwrap().is_none(), "control survives deadline");
-    assert_eq!(process_identity(control_pid), Some(control_identity));
     control.kill().await.unwrap();
 }
 
