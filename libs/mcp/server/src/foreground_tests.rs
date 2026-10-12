@@ -1,3 +1,6 @@
+// Fixture helpers intentionally fail fast on setup/transport errors.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use super::tests::local_container_with_profile;
 use super::*;
 use rmcp::service::PeerRequestOptions;
