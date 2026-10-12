@@ -1520,10 +1520,10 @@ SAFETY NOTES:
             Err(_) => {
                 // Timeout occurred, kill the process
                 if let Err(error) = child.terminate().await {
-                        return Err(CallToolResult::error(vec![Content::text(format!(
-                            "Foreground command cleanup failed: {error}"
-                        ))]));
-                    }
+                    return Err(CallToolResult::error(vec![Content::text(format!(
+                        "Foreground command cleanup failed: {error}"
+                    ))]));
+                }
                 result.push_str(&format!(
                     "Command timed out after {} seconds\n",
                     timeout.unwrap_or_default()
