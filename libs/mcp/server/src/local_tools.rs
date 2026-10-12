@@ -1336,6 +1336,7 @@ SAFETY NOTES:
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(actual_command)
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -1463,14 +1464,13 @@ SAFETY NOTES:
                     }
                 }
 
-                #[cfg(unix)]
-                if child.has_exited()? {
+                if let Ok(Some(_)) = child.child_mut().try_wait() {
                     break;
                 }
             }
 
             // Wait for the process to complete
-            child.wait().await
+            child.child_mut().wait().await
         };
 
         // Execute with timeout and cancellation support
@@ -1481,7 +1481,11 @@ SAFETY NOTES:
                 result = tokio::time::timeout(timeout_duration, stream_and_wait) => result,
                 _ = ctx.ct.cancelled() => {
                     // Cancellation occurred, kill the process
-                    let _ = child.terminate().await;
+                    if let Err(error) = child.terminate().await {
+                        return Err(CallToolResult::error(vec![Content::text(format!(
+                            "Foreground command cleanup failed: {error}"
+                        ))]));
+                    }
                     return Err(CallToolResult::cancel(Some(&vec![
                         Content::text("COMMAND_CANCELLED"),
                         Content::text("Command execution was cancelled"),
@@ -1492,7 +1496,11 @@ SAFETY NOTES:
             tokio::select! {
                 result = stream_and_wait => Ok(result),
                 _ = ctx.ct.cancelled() => {
-                    let _ = child.terminate().await;
+                    if let Err(error) = child.terminate().await {
+                        return Err(CallToolResult::error(vec![Content::text(format!(
+                            "Foreground command cleanup failed: {error}"
+                        ))]));
+                    }
                     return Err(CallToolResult::cancel(Some(&vec![
                         Content::text("COMMAND_CANCELLED"),
                         Content::text("Command execution was cancelled"),
@@ -1511,7 +1519,11 @@ SAFETY NOTES:
             }
             Err(_) => {
                 // Timeout occurred, kill the process
-                let _ = child.terminate().await;
+                if let Err(error) = child.terminate().await {
+                        return Err(CallToolResult::error(vec![Content::text(format!(
+                            "Foreground command cleanup failed: {error}"
+                        ))]));
+                    }
                 result.push_str(&format!(
                     "Command timed out after {} seconds\n",
                     timeout.unwrap_or_default()
@@ -3310,130 +3322,6 @@ fn unicode_normalized_replace(
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    mod foreground_regressions {
-        use super::*;
-        use rmcp::service::PeerRequestOptions;
-        use rmcp::{ServiceExt, model::ClientRequest};
-
-        async fn wait_for_marker(path: &Path) -> u32 {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    if let Ok(text) = fs::read_to_string(path)
-                        && let Ok(pid) = text.trim().parse()
-                    {
-                        return pid;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("nested shell must author its start marker")
-        }
-
-        async fn assert_gone(pid: u32) {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
-                    // A killed orphan may briefly remain a zombie under CI's
-                    // init; it cannot execute or create the delayed artifact.
-                    if stat.as_ref().map_or(true, |s| {
-                        s.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z'))
-                    }) {
-                        break;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("owned shell must stop executing");
-        }
-
-        async fn exercise(kind: &str, configured_timeout: Option<u64>) {
-            let dir = tempfile::tempdir().unwrap();
-            let marker = dir.path().join("started");
-            let late = dir.path().join("late");
-            let command = format!(
-                "sh -c 'echo $$ > "{}"; sleep 2; echo late > "{}"' & wait",
-                marker.display(), late.display()
-            );
-            let mut control = Command::new("sleep").arg("30").spawn().unwrap();
-            let (client_io, server_io) = tokio::io::duplex(65536);
-            let server = tokio::spawn(async move {
-                local_container_with_profile(None).serve(server_io).await.unwrap()
-            });
-            let client = ().serve(client_io).await.unwrap();
-            let server = server.await.unwrap();
-            let request = client
-                .send_cancellable_request(
-                    ClientRequest::CallToolRequest(Request::new(CallToolRequestParam {
-                        name: "run_command".into(),
-                        arguments: Some(serde_json::json!({
-                            "command": command,
-                            "timeout": configured_timeout,
-                        }).as_object().unwrap().clone()),
-                        ..Default::default()
-                    })),
-                    PeerRequestOptions::default(),
-                )
-                .await
-                .unwrap();
-            let pid = wait_for_marker(&marker).await;
-            if kind == "disconnect" {
-                client.cancel().await.unwrap();
-                server.cancel().await.unwrap();
-            } else {
-                if kind == "cancel" {
-                    client.notify_cancelled(CancelledNotificationParam {
-                        request_id: request.id.clone(),
-                        reason: Some("regression cancellation".into()),
-                    }).await.unwrap();
-                }
-                let result = tokio::time::timeout(Duration::from_secs(5), request.await_response())
-                    .await.expect("executor must settle boundedly");
-                if kind == "timeout" {
-                    let result = result.unwrap();
-                    assert!(format!("{result:?}").contains("timed out"));
-                }
-                // The same MCP session must still execute a subsequent command.
-                let next = client.call_tool(CallToolRequestParam {
-                    name: "run_command".into(),
-                    arguments: Some(serde_json::json!({"command": "printf subsequent"})
-                        .as_object().unwrap().clone()),
-                    ..Default::default()
-                }).await.unwrap();
-                assert!(format!("{next:?}").contains("subsequent"));
-                client.cancel().await.unwrap();
-                server.cancel().await.unwrap();
-            }
-            assert_gone(pid).await;
-            assert!(control.try_wait().unwrap().is_none(), "unrelated process survives");
-            sleep(Duration::from_millis(2200)).await;
-            assert!(!late.exists(), "cancelled descendant must not write later");
-            control.kill().await.unwrap();
-        }
-
-        #[tokio::test]
-        async fn foreground_cancel_without_timeout() {
-            exercise("cancel", None).await;
-        }
-
-        #[tokio::test]
-        async fn foreground_cancel_with_timeout() {
-            exercise("cancel", Some(30)).await;
-        }
-
-        #[tokio::test]
-        async fn foreground_timeout() {
-            exercise("timeout", Some(1)).await;
-        }
-
-        #[tokio::test]
-        async fn foreground_disconnect() {
-            exercise("disconnect", None).await;
-        }
-    }
-
     #[test]
     fn run_remote_command_request_whitespace_remote_deserializes_but_validated_at_runtime() {
         let result = serde_json::from_value::<RunRemoteCommandRequest>(serde_json::json!({
@@ -3496,7 +3384,7 @@ mod tests {
         );
     }
 
-    fn local_container_with_profile(profile_name: Option<&str>) -> ToolContainer {
+    pub(super) fn local_container_with_profile(profile_name: Option<&str>) -> ToolContainer {
         let task_manager = stakpak_shared::task_manager::TaskManager::new();
         ToolContainer::new(
             None,
@@ -4222,3 +4110,7 @@ mod tests {
         assert_eq!(result, Some(("a***b***c".to_string(), 2)));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "foreground_tests.rs"]
+mod foreground_tests;
