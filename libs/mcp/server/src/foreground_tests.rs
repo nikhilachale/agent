@@ -3,6 +3,45 @@ use super::*;
 use rmcp::service::PeerRequestOptions;
 use rmcp::{ServiceExt, model::ClientRequest};
 
+struct ExecutionHarness {
+    container: ToolContainer,
+    abort_execution: bool,
+}
+
+impl rmcp::ServerHandler for ExecutionHarness {
+    fn get_info(&self) -> ServerInfo {
+        rmcp::ServerHandler::get_info(&self.container)
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = request.arguments.as_ref()
+            .and_then(|args| args.get("command"))
+            .and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        if !self.abort_execution || command == "printf subsequent" {
+            return rmcp::ServerHandler::call_tool(&self.container, request, ctx).await;
+        }
+        let container = self.container.clone();
+        let ct = ctx.ct.clone();
+        let execution = tokio::spawn(async move {
+            container.execute_local_command(&command, None, &ctx).await
+        });
+        ct.cancelled().await;
+        execution.abort();
+        assert!(execution.await.unwrap_err().is_cancelled());
+        Ok(CallToolResult::cancel(None))
+    }
+}
+
+fn process_identity(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    fields.split_whitespace().nth(19).map(str::to_owned)
+}
+
 async fn wait_for_marker(path: &Path) -> u32 {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -18,13 +57,13 @@ async fn wait_for_marker(path: &Path) -> u32 {
     .expect("nested shell must author its start marker")
 }
 
-async fn assert_gone(pid: u32) {
+async fn assert_gone(pid: u32, identity: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
             // A killed orphan may briefly remain a zombie under CI's
             // init; it cannot execute or create the delayed artifact.
-            if stat.as_ref().map_or(true, |s| {
+            if process_identity(pid).as_deref() != Some(identity) || stat.as_ref().map_or(true, |s| {
                 s.rsplit_once(") ")
                     .is_some_and(|(_, rest)| rest.starts_with('Z'))
             }) {
@@ -48,9 +87,12 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
         outer.display(), marker.display(), sleeper.display(), late.display()
     );
     let mut control = Command::new("sleep").arg("30").kill_on_drop(true).spawn().unwrap();
+    let control_pid = control.id().unwrap();
+    let control_identity = process_identity(control_pid).unwrap();
     let (client_io, server_io) = tokio::io::duplex(65536);
+    let abort_execution = kind == "abort";
     let server = tokio::spawn(async move {
-        local_container_with_profile(None)
+        ExecutionHarness { container: local_container_with_profile(None), abort_execution }
             .serve(server_io)
             .await
             .unwrap()
@@ -70,7 +112,6 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
                     .unwrap()
                     .clone(),
                 ),
-                ..Default::default()
             })),
             PeerRequestOptions::default(),
         )
@@ -79,11 +120,12 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
     let pid = wait_for_marker(&marker).await;
     let outer_pid = wait_for_marker(&outer).await;
     let sleeper_pid = wait_for_marker(&sleeper).await;
+    let owned = [outer_pid, pid, sleeper_pid].map(|pid| (pid, process_identity(pid).unwrap()));
     if kind == "disconnect" {
         client.cancel().await.unwrap();
         server.cancel().await.unwrap();
     } else {
-        if kind == "cancel" {
+        if kind == "cancel" || kind == "abort" {
             client
                 .notify_cancelled(CancelledNotificationParam {
                     request_id: request.id.clone(),
@@ -109,7 +151,6 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
                         .unwrap()
                         .clone(),
                 ),
-                ..Default::default()
             })
             .await
             .unwrap();
@@ -117,9 +158,10 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
         client.cancel().await.unwrap();
         server.cancel().await.unwrap();
     }
-    assert_gone(pid).await;
-    assert_gone(outer_pid).await;
-    assert_gone(sleeper_pid).await;
+    for (pid, identity) in owned {
+        assert_gone(pid, &identity).await;
+    }
+    assert_eq!(process_identity(control_pid), Some(control_identity.clone()));
     assert!(
         control.try_wait().unwrap().is_none(),
         "unrelated process survives"
@@ -127,6 +169,7 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
     sleep(Duration::from_millis(2200)).await;
     assert!(!late.exists(), "cancelled descendant must not write later");
     assert!(control.try_wait().unwrap().is_none(), "control survives deadline");
+    assert_eq!(process_identity(control_pid), Some(control_identity));
     control.kill().await.unwrap();
 }
 
@@ -148,4 +191,9 @@ async fn foreground_timeout() {
 #[tokio::test]
 async fn foreground_disconnect() {
     exercise("disconnect", None).await;
+}
+
+#[tokio::test]
+async fn foreground_execution_future_abort() {
+    exercise("abort", None).await;
 }
