@@ -30,6 +30,10 @@ impl rmcp::ServerHandler for ExecutionHarness {
         }
         let container = self.container.clone();
         let ct = ctx.ct.clone();
+        // This case aborts the execution future itself, independently of the
+        // executor's ordinary request-token cancellation branches.
+        let mut ctx = ctx;
+        ctx.ct = Default::default();
         let execution =
             tokio::spawn(
                 async move { container.execute_local_command(&command, None, &ctx).await },

@@ -1411,8 +1411,7 @@ SAFETY NOTES:
                                 })
                                 .await;
                         }
-                        Ok(Err(error)) => return Err(error),
-                        Err(_) => {} // Timeout - continue loop
+                        Err(error) => return Err(error),
                     }
                 };
             }
