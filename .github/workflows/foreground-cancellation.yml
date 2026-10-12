@@ -41,6 +41,7 @@ jobs:
           s += '\n#[cfg(all(test, target_os = "linux"))]\n#[path = "foreground_tests.rs"]\nmod foreground_tests;\n'
           p.write_text(s)
           PYTHON
+          cargo test --locked -p stakpak-mcp-server --no-run
           if cargo test --locked -p stakpak-mcp-server foreground_cancel_without_timeout -- --nocapture; then
             echo 'Stock executor unexpectedly passed; regression does not demonstrate the defect'
             exit 1

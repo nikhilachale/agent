@@ -2,9 +2,15 @@ use super::*;
 use tokio::process::Command;
 
 fn successful_child() -> ForegroundCommand {
-    ForegroundCommand::new(Command::new("sh")
-        .arg("-c").arg("exit 7").process_group(0)
-        .kill_on_drop(true).spawn().unwrap())
+    ForegroundCommand::new(
+        Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap(),
+    )
 }
 
 #[tokio::test]
@@ -28,7 +34,9 @@ async fn foreground_try_wait_disarms_group_after_reap() {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert!(owned.child_mut().id().is_none());
     owned.kill_group().unwrap();
     drop(owned);

@@ -1366,10 +1366,8 @@ SAFETY NOTES:
         let stdout = child.child_mut().stdout.take().unwrap();
         #[allow(clippy::unwrap_used)]
         let stderr = child.child_mut().stderr.take().unwrap();
-        let mut stdout_reader = BufReader::new(stdout);
-        let mut stderr_reader = BufReader::new(stderr);
-        let mut stdout_buf = String::new();
-        let mut stderr_buf = String::new();
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
         let mut stdout_done = false;
         let mut stderr_done = false;
         let mut result = String::new();
@@ -1387,14 +1385,12 @@ SAFETY NOTES:
             stall_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             macro_rules! handle_output {
-                ($read_result:expr, $buf:expr, $done:expr) => {
+                ($read_result:expr, $done:expr) => {
                     match $read_result {
-                        Ok(Ok(0)) => $done = true, // Drain the other pipe before waiting
-                        Ok(Ok(_)) => {
+                        Ok(None) => $done = true, // Drain the other pipe before waiting
+                        Ok(Some(line)) => {
                             last_output_time = std::time::Instant::now();
                             stall_start_time = None; // Reset stall tracking on output
-                            let line = $buf.trim_end_matches('\n').to_string();
-                            $buf.clear();
                             result.push_str(&format!("{}\n", line));
                             let _ = ctx
                                 .peer
@@ -1416,7 +1412,7 @@ SAFETY NOTES:
                                 .await;
                         }
                         Ok(Err(error)) => return Err(error),
-                        Err(_) => {}         // Timeout - continue loop
+                        Err(_) => {} // Timeout - continue loop
                     }
                 };
             }
@@ -1457,12 +1453,12 @@ SAFETY NOTES:
                         }
                     }
 
-                    read_result = tokio::time::timeout(Duration::from_millis(100), stderr_reader.read_line(&mut stderr_buf)), if !stderr_done => {
-                        handle_output!(read_result, stderr_buf, stderr_done);
+                    read_result = stderr_reader.next_line(), if !stderr_done => {
+                        handle_output!(read_result, stderr_done);
                     }
 
-                    read_result = tokio::time::timeout(Duration::from_millis(100), stdout_reader.read_line(&mut stdout_buf)), if !stdout_done => {
-                        handle_output!(read_result, stdout_buf, stdout_done);
+                    read_result = stdout_reader.next_line(), if !stdout_done => {
+                        handle_output!(read_result, stdout_done);
                     }
                 }
 

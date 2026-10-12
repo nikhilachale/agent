@@ -18,17 +18,22 @@ impl rmcp::ServerHandler for ExecutionHarness {
         request: CallToolRequestParam,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let command = request.arguments.as_ref()
+        let command = request
+            .arguments
+            .as_ref()
             .and_then(|args| args.get("command"))
-            .and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         if !self.abort_execution || command == "printf subsequent" {
             return rmcp::ServerHandler::call_tool(&self.container, request, ctx).await;
         }
         let container = self.container.clone();
         let ct = ctx.ct.clone();
-        let execution = tokio::spawn(async move {
-            container.execute_local_command(&command, None, &ctx).await
-        });
+        let execution =
+            tokio::spawn(
+                async move { container.execute_local_command(&command, None, &ctx).await },
+            );
         ct.cancelled().await;
         execution.abort();
         assert!(execution.await.unwrap_err().is_cancelled());
@@ -63,10 +68,12 @@ async fn assert_gone(pid: u32, identity: &str) {
             let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
             // A killed orphan may briefly remain a zombie under CI's
             // init; it cannot execute or create the delayed artifact.
-            if process_identity(pid).as_deref() != Some(identity) || stat.as_ref().map_or(true, |s| {
-                s.rsplit_once(") ")
-                    .is_some_and(|(_, rest)| rest.starts_with('Z'))
-            }) {
+            if process_identity(pid).as_deref() != Some(identity)
+                || stat.as_ref().map_or(true, |s| {
+                    s.rsplit_once(") ")
+                        .is_some_and(|(_, rest)| rest.starts_with('Z'))
+                })
+            {
                 break;
             }
             sleep(Duration::from_millis(10)).await;
@@ -76,16 +83,27 @@ async fn assert_gone(pid: u32, identity: &str) {
     .expect("owned shell must stop executing");
 }
 
-async fn prove_cleanup(owned: &[(u32, String)], late: &Path, control: &mut tokio::process::Child, identity: &str) {
+async fn prove_cleanup(
+    owned: &[(u32, String)],
+    late: &Path,
+    control: &mut tokio::process::Child,
+    identity: &str,
+) {
     for (pid, identity) in owned {
         assert_gone(*pid, identity).await;
     }
     let control_pid = control.id().unwrap();
-    assert!(control.try_wait().unwrap().is_none(), "unrelated process survives");
+    assert!(
+        control.try_wait().unwrap().is_none(),
+        "unrelated process survives"
+    );
     assert_eq!(process_identity(control_pid).as_deref(), Some(identity));
     sleep(Duration::from_millis(2200)).await;
     assert!(!late.exists(), "cancelled descendant must not write later");
-    assert!(control.try_wait().unwrap().is_none(), "control survives deadline");
+    assert!(
+        control.try_wait().unwrap().is_none(),
+        "control survives deadline"
+    );
     assert_eq!(process_identity(control_pid).as_deref(), Some(identity));
 }
 
@@ -97,18 +115,28 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
     let sleeper = dir.path().join("sleeper");
     let command = format!(
         r#"echo $$ > "{}"; sh -c 'echo $$ > "{}"; sleep 2 & echo $! > "{}"; wait; echo late > "{}"' & wait"#,
-        outer.display(), marker.display(), sleeper.display(), late.display()
+        outer.display(),
+        marker.display(),
+        sleeper.display(),
+        late.display()
     );
-    let mut control = Command::new("sleep").arg("30").kill_on_drop(true).spawn().unwrap();
+    let mut control = Command::new("sleep")
+        .arg("30")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
     let control_pid = control.id().unwrap();
     let control_identity = process_identity(control_pid).unwrap();
     let (client_io, server_io) = tokio::io::duplex(65536);
     let abort_execution = kind == "abort";
     let server = tokio::spawn(async move {
-        ExecutionHarness { container: local_container_with_profile(None), abort_execution }
-            .serve(server_io)
-            .await
-            .unwrap()
+        ExecutionHarness {
+            container: local_container_with_profile(None),
+            abort_execution,
+        }
+        .serve(server_io)
+        .await
+        .unwrap()
     });
     let client = ().serve(client_io).await.unwrap();
     let server = server.await.unwrap();
