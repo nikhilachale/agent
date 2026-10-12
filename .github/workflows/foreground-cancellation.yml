@@ -68,7 +68,12 @@ jobs:
 
   upstream-suites:
     timeout-minutes: 45
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    env:
+      # Keep assertions/debug behavior; omit symbols to bound linker memory.
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

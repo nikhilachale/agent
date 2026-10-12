@@ -1336,7 +1336,6 @@ SAFETY NOTES:
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(actual_command)
-            .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -1469,7 +1468,7 @@ SAFETY NOTES:
             }
 
             // Wait for the process to complete
-            child.child_mut().wait().await
+            child.wait().await
         };
 
         // Execute with timeout and cancellation support

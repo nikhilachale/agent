@@ -10,7 +10,6 @@ fn successful_child() -> ForegroundCommand {
             .arg("-c")
             .arg("exit 7")
             .process_group(0)
-            .kill_on_drop(true)
             .spawn()
             .unwrap(),
     )
@@ -19,7 +18,7 @@ fn successful_child() -> ForegroundCommand {
 #[tokio::test]
 async fn foreground_wait_disarms_group_after_reap() {
     let mut owned = successful_child();
-    assert_eq!(owned.child_mut().wait().await.unwrap().code(), Some(7));
+    assert_eq!(owned.wait().await.unwrap().code(), Some(7));
     assert!(owned.child_mut().id().is_none());
     // No numeric authority remains even if Drop is delayed.
     owned.kill_group().unwrap();
@@ -41,6 +40,21 @@ async fn foreground_try_wait_disarms_group_after_reap() {
     .await
     .unwrap();
     assert!(owned.child_mut().id().is_none());
+    owned.kill_group().unwrap();
+    drop(owned);
+}
+
+#[tokio::test]
+async fn foreground_external_reap_disarms_signal_authority() {
+    let mut owned = successful_child();
+    let pid = owned.child_mut().id().unwrap() as libc::pid_t;
+    let mut status = 0;
+    // SAFETY: reap only this test's exact owned child, simulating an external
+    // reaper. It immediately exits; no global waitpid(-1) or PID reuse tricks.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    let error = owned.wait().await.unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    assert!(!owned.owned);
     owned.kill_group().unwrap();
     drop(owned);
 }

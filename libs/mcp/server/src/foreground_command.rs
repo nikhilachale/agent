@@ -6,11 +6,12 @@ use tokio::process::Child;
 /// deliberately leave this group are outside this cancellation boundary.
 pub(crate) struct ForegroundCommand {
     child: Child,
+    owned: bool,
 }
 
 impl ForegroundCommand {
     pub(crate) fn new(child: Child) -> Self {
-        Self { child }
+        Self { child, owned: true }
     }
 
     pub(crate) fn child_mut(&mut self) -> &mut Child {
@@ -19,6 +20,9 @@ impl ForegroundCommand {
 
     #[cfg(unix)]
     fn kill_group(&mut self) -> io::Result<()> {
+        if !self.owned {
+            return Ok(());
+        }
         if let Some(pid) = self.child.id() {
             let pid = libc::pid_t::try_from(pid)
                 .map_err(|_| io::Error::other("invalid foreground process ID"))?;
@@ -38,12 +42,26 @@ impl ForegroundCommand {
         Ok(())
     }
 
+    pub(crate) async fn wait(&mut self) -> io::Result<ExitStatus> {
+        let result = self.child.wait().await;
+        match &result {
+            Ok(_) => self.owned = false,
+            // Child::id remains Some on a wait error. ECHILD means the
+            // exclusive ownership assumption was broken by another reaper;
+            // never signal that numeric PID/group again, including in Drop.
+            #[cfg(unix)]
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => self.owned = false,
+            Err(_) => {}
+        }
+        result
+    }
+
     pub(crate) async fn terminate(&mut self) -> io::Result<ExitStatus> {
         #[cfg(unix)]
         self.kill_group()?;
         #[cfg(not(unix))]
         self.child.start_kill()?;
-        tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait())
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.wait())
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "foreground cleanup timed out"))?
     }
@@ -51,13 +69,19 @@ impl ForegroundCommand {
 
 impl Drop for ForegroundCommand {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         #[cfg(unix)]
         if let Err(error) = self.kill_group() {
             tracing::error!("Failed to kill foreground command group: {error}");
         }
-        // The child was spawned with kill_on_drop(true). Tokio handles direct
-        // child fallback/reaping; group signalling must happen synchronously
-        // first, including when a request future is aborted or dropped.
+        // Direct-child fallback is also restricted to a still-owned child.
+        // Command's default kill_on_drop(false) avoids a deferred stale-PID
+        // kill after ECHILD; Tokio still handles reaping when Child is dropped.
+        if self.child.id().is_some() {
+            let _ = self.child.start_kill();
+        }
     }
 }
 
