@@ -154,7 +154,7 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
             })
             .await
             .unwrap();
-        assert!(format!("{next:?}").contains("subsequent"));
+        assert!(format!("{next:?}").contains("subsequent"), "{next:?}");
         client.cancel().await.unwrap();
         server.cancel().await.unwrap();
     }

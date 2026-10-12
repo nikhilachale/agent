@@ -1370,6 +1370,8 @@ SAFETY NOTES:
         let mut stderr_reader = BufReader::new(stderr);
         let mut stdout_buf = String::new();
         let mut stderr_buf = String::new();
+        let mut stdout_done = false;
+        let mut stderr_done = false;
         let mut result = String::new();
         let progress_id = Uuid::new_v4();
 
@@ -1385,9 +1387,9 @@ SAFETY NOTES:
             stall_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             macro_rules! handle_output {
-                ($read_result:expr, $buf:expr) => {
+                ($read_result:expr, $buf:expr, $done:expr) => {
                     match $read_result {
-                        Ok(Ok(0)) => break, // EOF
+                        Ok(Ok(0)) => $done = true, // Drain the other pipe before waiting
                         Ok(Ok(_)) => {
                             last_output_time = std::time::Instant::now();
                             stall_start_time = None; // Reset stall tracking on output
@@ -1413,7 +1415,7 @@ SAFETY NOTES:
                                 })
                                 .await;
                         }
-                        Ok(Err(_)) => break, // Read error
+                        Ok(Err(error)) => return Err(error),
                         Err(_) => {}         // Timeout - continue loop
                     }
                 };
@@ -1455,16 +1457,16 @@ SAFETY NOTES:
                         }
                     }
 
-                    read_result = tokio::time::timeout(Duration::from_millis(100), stderr_reader.read_line(&mut stderr_buf)) => {
-                        handle_output!(read_result, stderr_buf);
+                    read_result = tokio::time::timeout(Duration::from_millis(100), stderr_reader.read_line(&mut stderr_buf)), if !stderr_done => {
+                        handle_output!(read_result, stderr_buf, stderr_done);
                     }
 
-                    read_result = tokio::time::timeout(Duration::from_millis(100), stdout_reader.read_line(&mut stdout_buf)) => {
-                        handle_output!(read_result, stdout_buf);
+                    read_result = tokio::time::timeout(Duration::from_millis(100), stdout_reader.read_line(&mut stdout_buf)), if !stdout_done => {
+                        handle_output!(read_result, stdout_buf, stdout_done);
                     }
                 }
 
-                if let Ok(Some(_)) = child.child_mut().try_wait() {
+                if stdout_done && stderr_done {
                     break;
                 }
             }
