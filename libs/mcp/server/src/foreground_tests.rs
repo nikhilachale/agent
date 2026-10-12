@@ -117,8 +117,9 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
     let late = dir.path().join("late");
     let outer = dir.path().join("outer");
     let sleeper = dir.path().join("sleeper");
+    let completion = if kind == "leader-exit" { "exit 0" } else { "wait" };
     let command = format!(
-        r#"echo $$ > "{}"; sh -c 'echo $$ > "{}"; sleep 2 & echo $! > "{}"; wait; echo late > "{}"' & wait"#,
+        r#"echo $$ > "{}"; sh -c 'echo $$ > "{}"; sleep 2 & echo $! > "{}"; wait; echo late > "{}"' & {completion}"#,
         outer.display(),
         marker.display(),
         sleeper.display(),
@@ -171,7 +172,7 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
         server.cancel().await.unwrap();
         prove_cleanup(&owned, &late, &mut control, &control_identity).await;
     } else {
-        if kind == "cancel" || kind == "abort" {
+        if kind == "cancel" || kind == "abort" || kind == "leader-exit" {
             client
                 .notify_cancelled(CancelledNotificationParam {
                     request_id: request.id.clone(),
@@ -231,4 +232,9 @@ async fn foreground_disconnect() {
 #[tokio::test]
 async fn foreground_execution_future_abort() {
     exercise("abort", None).await;
+}
+
+#[tokio::test]
+async fn foreground_cancel_after_leader_exit_before_pipe_eof() {
+    exercise("leader-exit", None).await;
 }
