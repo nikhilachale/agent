@@ -48,6 +48,7 @@ jobs:
           fi
           git restore libs/mcp/server/src/local_tools.rs
           cargo fmt --all
+      - run: cargo clippy --locked -p stakpak-mcp-server --all-targets -- -D warnings
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - run: |
@@ -57,7 +58,16 @@ jobs:
           cargo test --locked -p stakai --features network-tests
       - run: cargo build --locked --release -p stakpak
       - run: git diff --exit-code
+      - name: Record prerelease artifact provenance
+        run: |
+          git rev-parse HEAD > target/release/source-commit.txt
+          rustc --version > target/release/rust-version.txt
+          sha256sum target/release/stakpak > target/release/stakpak.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: stakpak-linux-prerelease-${{ github.sha }}
-          path: target/release/stakpak
+          path: |
+            target/release/stakpak
+            target/release/stakpak.sha256
+            target/release/source-commit.txt
+            target/release/rust-version.txt

@@ -1366,6 +1366,8 @@ SAFETY NOTES:
         let stdout = child.child_mut().stdout.take().unwrap();
         #[allow(clippy::unwrap_used)]
         let stderr = child.child_mut().stderr.take().unwrap();
+        // Lines::next_line is cancellation-safe in select!: read_line can
+        // discard a partial final line when the other pipe or timer wins.
         let mut stdout_reader = BufReader::new(stdout).lines();
         let mut stderr_reader = BufReader::new(stderr).lines();
         let mut stdout_done = false;

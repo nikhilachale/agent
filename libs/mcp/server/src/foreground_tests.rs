@@ -117,7 +117,11 @@ async fn exercise(kind: &str, configured_timeout: Option<u64>) {
     let late = dir.path().join("late");
     let outer = dir.path().join("outer");
     let sleeper = dir.path().join("sleeper");
-    let completion = if kind == "leader-exit" { "exit 0" } else { "wait" };
+    let completion = if kind == "leader-exit" {
+        "exit 0"
+    } else {
+        "wait"
+    };
     let command = format!(
         r#"echo $$ > "{}"; sh -c 'echo $$ > "{}"; sleep 2 & echo $! > "{}"; wait; echo late > "{}"' & {completion}"#,
         outer.display(),
